@@ -1,7 +1,9 @@
 #include <string.h>
 #include <math.h>
-
+//#include <glib.h>
 #include <gst/gst.h>
+#include <gst/rtp/gstrtcpbuffer.h>
+//#include <gst/controller/gstcontroller.h>
 
 /* A simple RTP server*/
 
@@ -25,8 +27,8 @@
 #define AUDIO_PAY  "rtpmp4gpay"
 
 /*Default values of the arguments*/
-static int width  = 640;
-static int height = 480;
+static int width  = 320;
+static int height = 240;
 static int fps    = 15;
 static int bitrate = 300;
 static char *host = NULL;
@@ -134,10 +136,93 @@ static void arguments_parse(int argcount, char** argvar)
 	 } 
 } 
 
+static gboolean
+get_rtcp_packet(GstRTCPPacket *packet)
+{
+        guint32 rtptime, packet_count, octet_count;
+	guint64 ntptime;
+	guint count, i;
+        
+        guint32 exthighestseq, jitter, lsr, dlsr, ssrc;
+        guint8 fractionlost;
+        gint32 packetslost;
+
+	count = gst_rtcp_packet_get_rb_count(packet);
+	g_print("    count         %d", count);
+	for (i=0; i<count; i++)
+        {
+		gst_rtcp_packet_get_rb(packet, i, &ssrc, &fractionlost,
+				&packetslost, &exthighestseq, &jitter, &lsr, &dlsr);
+
+		g_print("    block         %d\n", i);
+		g_print("    ssrc          %d\n", ssrc);
+		g_print("    highest   seq %d\n", exthighestseq);
+		g_print("    jitter        %d\n", jitter);
+		g_print("    fraction lost %d\n", fractionlost);
+		g_print("    packet   lost %d\n", packetslost);
+
+	}
+
+	return TRUE;
+}
+
+static gboolean
+received_rtcp_packet(GstElement *src, GstBuffer *buf, gpointer data)
+{
+   GstElement *videoenc;
+   GValue v = {0, };
+   GValue * bitrateval = &v;
+   int int_v ;
+   guint count, i;
+   gboolean nextpckt;
+   GstRTCPPacket packet;
+    GstRTCPType type;
+
+  if (!gst_rtcp_buffer_validate(buf))
+		g_debug("Received invalid RTCP packet");
+
+   g_print("Received RTCP packet\n");
+      
+   buf = gst_buffer_make_metadata_writable(buf);
+   nextpckt = gst_rtcp_buffer_get_first_packet(buf, &packet);
+   while(nextpckt)
+   {
+	type = gst_rtcp_packet_get_type(&packet);
+	switch (type)
+        {
+        	case GST_RTCP_TYPE_RR:
+			//send_event_to_encoder(venc, &rtcp_pkt);
+                       // g_print("Packet Type : %d\n",type);  
+                        get_rtcp_packet(&packet); 			
+			break;
+		default:
+			g_print("Other type : %d\n",type);
+			break;
+	}
+	nextpckt = gst_rtcp_packet_move_to_next(&packet);
+        g_print("Next Packet analyze\n");
+    }
+
+   videoenc = (GstElement *)(data);
+   
+   g_value_init(&v, G_TYPE_INT);
+   g_object_get_property(G_OBJECT(videoenc), "bitrate" , &v);
+   
+   int_v = g_value_get_int(bitrateval);
+   g_print("Current bitrate value:%d\n",int_v);
+  // bitrate= bitrate + 100;
+   
+   g_print("In received_rtcp_packet encoder set up\n"); 
+   g_object_set (videoenc, "tune",0x00000004,"byte-stream",TRUE,"bitrate",bitrate,NULL);
+
+     
+   return TRUE;
+}
+
 int main (int argc, char *argv[])
 {
   GstElement *videosrc,*audiosrc, *videorate,*audioconv,*videoenc, *audioenc,*videopay, *audiopay;
-  GstElement *rtpbin, *rtpsink, *rtcpsink, *rtcpsrc,*audiortpsink,*audiortcpsink,*audiortcpsrc;
+  GstElement *rtpbin, *rtpsink, *rtcpsink, *rtcpsrc,*audiortpsink,*audiortcpsink,*audiortcpsrc, *identity;
   GstElement *pipeline,*videoqueue;
   GMainLoop *loop;
   GstPad *srcpad, *sinkpad;
@@ -168,8 +253,10 @@ int main (int argc, char *argv[])
   /*Encodes video to H264 stream and RTP payloading*/
   videoenc = gst_element_factory_make (VIDEO_ENC, "videoenc");
   g_assert (videoenc);
- 
-  g_object_set (videoenc, "tune",0x00000004,"byte-stream",TRUE,"bitrate",bitrate,NULL); 
+  
+  g_print("Initial encoder set up\n"); 
+  g_object_set (videoenc, "tune",0x00000004,"byte-stream",TRUE,"bitrate",bitrate,NULL);
+   
   videopay = gst_element_factory_make (VIDEO_PAY, "videopay");
   g_assert (videopay);
   
@@ -244,7 +331,18 @@ int main (int argc, char *argv[])
   
   g_object_set (rtcpsrc, "port", 5005, NULL);
 
-  gst_bin_add_many (GST_BIN (pipeline), rtpsink, rtcpsink, rtcpsrc, NULL);
+
+  /*identity element connected to rtcpsrc, to check if received any packets or not*/
+	identity = gst_element_factory_make("identity", "udpsrc-rtcp-identity");
+	if ( !identity ) 
+	{
+		g_printerr("Failed to create identity element\n");
+		return 0;
+	}
+	/*set identity element to sync to clock*/
+	g_object_set(G_OBJECT (identity), "sync", TRUE, NULL);
+
+  gst_bin_add_many (GST_BIN (pipeline), rtpsink, rtcpsink, rtcpsrc,identity, NULL);
 
   /* Now link all to the rtpbin,start by getting an RTP sinkpad for session 0*/
   sinkpad = gst_element_get_request_pad (rtpbin, "send_rtp_sink_0");
@@ -252,7 +350,7 @@ int main (int argc, char *argv[])
 
   if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
     g_error ("Failed to link video payloader to rtpbin");
-  gst_object_unref (srcpad);
+   gst_object_unref (srcpad);
   
   /* Get the RTP srcpad that was created when we requested the sinkpad above
    * and link it to the rtpsink sinkpad.
@@ -262,8 +360,8 @@ int main (int argc, char *argv[])
 
    if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
     g_error ("Failed to link rtpbin to rtpsink");
-  gst_object_unref (srcpad);
-  gst_object_unref (sinkpad);
+   gst_object_unref (srcpad);
+   gst_object_unref (sinkpad);
 
   /* get an RTCP srcpad for sending RTCP to the receiver */
    srcpad = gst_element_get_request_pad (rtpbin, "send_rtcp_src_0");
@@ -271,16 +369,29 @@ int main (int argc, char *argv[])
 
    if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
     g_error ("Failed to link rtpbin to rtcpsink");
-  gst_object_unref (sinkpad);
-  
+   gst_object_unref (sinkpad);
+   gst_object_unref (srcpad); 
 
   /* We also want to receive RTCP, request an RTCP sinkpad for session 0 and
    * link it to the srcpad of the udpsrc for RTCP */
    srcpad = gst_element_get_static_pad (rtcpsrc, "src");
-   sinkpad = gst_element_get_request_pad (rtpbin, "recv_rtcp_sink_0");
+   sinkpad = gst_element_get_static_pad (identity, "sink");
+   gst_pad_add_buffer_probe (sinkpad, G_CALLBACK (received_rtcp_packet), videoenc);
+
    if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
-    g_error ("Failed to link rtcpsrc to rtpbin");
-  gst_object_unref (srcpad);
+    g_error ("Failed to link rtcpsrc to identity");
+   gst_object_unref (srcpad);
+   gst_object_unref (sinkpad);
+
+
+   srcpad = gst_element_get_static_pad (identity, "src");
+   sinkpad = gst_element_get_request_pad (rtpbin, "recv_rtcp_sink_0");
+
+   if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK)
+    g_error ("Failed to link identity to rtpbin");
+   gst_object_unref (srcpad);
+   gst_object_unref (sinkpad);
+
 
   /********************************Audio********************************/
   /*Add audio capture and payloading to the pipeline and link */
@@ -352,10 +463,12 @@ int main (int argc, char *argv[])
   /* Set the pipeline to playing */
   g_print ("starting sender pipeline\n");
   gst_element_set_state (pipeline, GST_STATE_PLAYING);
+  	
+
 
   /* print stats every second */
   g_timeout_add (1000, (GSourceFunc) print_stats, rtpbin);
-  g_object_set (videoenc, "tune",0x00000004,"byte-stream",TRUE,"bitrate",400,NULL);
+  //g_object_set (videoenc, "tune",0x00000004,"byte-stream",TRUE,"bitrate",400,NULL);
 
   /* we need to run a GLib main loop to get the messages */
   loop = g_main_loop_new (NULL, FALSE);
