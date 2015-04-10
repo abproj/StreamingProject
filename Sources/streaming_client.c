@@ -131,6 +131,7 @@ static void arguments_parse(int argcount, char** argvar)
             g_error_free (err);
           }
 
+
         //Default receiver IP to localhost
         if ( !host )
         {
