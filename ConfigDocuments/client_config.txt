@@ -1,0 +1,3 @@
+#Parameters
+#Server Host IP
+host  127.0.0.1 

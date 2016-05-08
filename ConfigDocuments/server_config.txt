@@ -1,0 +1,14 @@
+#Parameters
+#QCIF Resolution
+#width   176 
+#height  144
+#CIF Resolution
+width 352 
+height 288 
+fps_num  30 
+fps_den  1 
+bitrate  600 
+#IDR interval is 10 seconds
+IDRintv 300 
+#Client Host IP
+host  127.0.0.1
